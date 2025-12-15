@@ -1,0 +1,9 @@
+fastf1>=3.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0     # Required for saving/loading Parquet files efficiently
+requests            # For Ergast API
+tqdm                # Progress bars
+jupyter
+matplotlib
+seaborn

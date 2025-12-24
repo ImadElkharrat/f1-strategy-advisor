@@ -17,6 +17,13 @@ To replace deterministic strategy predictions (e.g., "Pit on lap 20") with proba
 3.  **Simulation Engine:** Projects race outcomes by sampling 1,000+ futures from the Bayesian posterior trace.
 4.  **Dashboard:** Interactive Streamlit UI for real-time "What-If" analysis.
 
+## Features
+### ⚔️ Duel Mode: The Undercut Estimator
+Beyond single-car optimization, the system simulates head-to-head duels.
+* **Scenario:** User selects a "Hero" and a "Rival" and defines the current time gap.
+* **Simulation:** The engine runs 2,000 paired simulations, calculating the probability of an "Undercut" (overtaking via pit strategy) vs. the risk of being caught later on older tires.
+* **Output:** A probability distribution of the final gap, helping engineers quantify the risk/reward of pitting early.
+
 ## 🚀 Quick Start
 
 ### 1. Installation

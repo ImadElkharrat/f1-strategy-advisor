@@ -8,9 +8,11 @@ import numpy as np
 from models import TireDegradationModel
 from simulation import RaceSimulator, DuelSimulator
 
-st.set_page_config(page_title="F1 Strategy Duel", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="F1 Strategy AI", layout="wide")
 
 
+# --- CACHED FUNCTIONS ---
 @st.cache_data
 def load_data():
     return pd.read_parquet("data/processed/2023_Bahrain_laps.parquet")
@@ -18,10 +20,14 @@ def load_data():
 
 @st.cache_resource
 def train_model(driver_code, _df):
-    """Trains a model for a specific driver."""
+    """
+    Trains the Bayesian model for a specific driver.
+    Cached so it doesn't re-run when you switch tabs.
+    """
     model = TireDegradationModel(driver_code)
     driver_data, compounds, map_ = model.prepare_data(_df)
 
+    # Run MCMC (Single Core for Windows Stability)
     with model.build_model(
             driver_data['TyreLife'].values,
             driver_data['CompoundIdx'].values,
@@ -33,82 +39,158 @@ def train_model(driver_code, _df):
     return trace, compounds, map_
 
 
-# --- SIDEBAR CONFIG ---
-st.sidebar.header("⚔️ Strategy Duel Config")
+# --- MAIN APP UI ---
+st.title("🏎️ Probabilistic F1 Strategy")
 
-# Select Hero
-hero_driver = st.sidebar.selectbox("Select Hero (Us)", ["VER", "HAM"], index=0)
-# Select Rival (excluding Hero)
-available_rivals = [d for d in ["VER", "HAM", "LEC", "ALO"] if d != hero_driver]
-rival_driver = st.sidebar.selectbox("Select Rival (Them)", available_rivals, index=0)
+# Global Settings (Sidebar)
+st.sidebar.header("Global Settings")
+pit_loss = st.sidebar.slider("Est. Pit Loss (sec)", 18.0, 26.0, 22.0)
 
-current_lap = st.sidebar.number_input("Current Lap", 10, 50, 15)
-gap_to_rival = st.sidebar.number_input("Gap to Rival (sec)", -10.0, 10.0, 2.5,
-                                       help="Positive = We are behind. Negative = We are ahead.")
-pit_loss = st.sidebar.slider("Pit Loss Time", 18.0, 25.0, 22.0)
-
-# --- MAIN UI ---
-st.title(f"Strategy Duel: {hero_driver} vs {rival_driver}")
-
+# Load Data Once
 data = load_data()
 
-# Train Both Models
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown(f"### 🔵 {hero_driver} Intelligence")
-    with st.spinner(f"Analyzing {hero_driver}..."):
-        trace_hero, _, _ = train_model(hero_driver, data)
-    st.success("Ready")
+# Create Tabs
+tab_analysis, tab_duel = st.tabs(["📉 Tire Degradation Analysis", "⚔️ Strategy Duel"])
 
-with col2:
-    st.markdown(f"### 🔴 {rival_driver} Intelligence")
-    with st.spinner(f"Analyzing {rival_driver}..."):
-        trace_rival, _, _ = train_model(rival_driver, data)
-    st.success("Ready")
+# =========================================
+# TAB 1: TIRE DEGRADATION (Physics View)
+# =========================================
+with tab_analysis:
+    st.header("Tire Physics & Single-Car Optimization")
 
-# --- SIMULATION ---
-st.divider()
-st.subheader("🔮 The Undercut Simulator")
+    # 1. Driver Selection
+    driver = st.selectbox("Select Driver to Analyze", ["VER", "LEC", "HAM", "ALO", "RUS"], index=0)
 
-# Input: When do we pit? When do they pit?
-c1, c2 = st.columns(2)
-with c1:
-    hero_pit = st.slider(f"Pit Lap: {hero_driver}", current_lap + 1, 57, current_lap + 1)
-with c2:
-    rival_pit = st.slider(f"Pit Lap: {rival_driver}", current_lap + 1, 57, current_lap + 5)
+    # 2. Train Model
+    with st.spinner(f"Calibrating physics model for {driver}..."):
+        trace, compounds, map_ = train_model(driver, data)
+    st.success(f"Model calibrated for {driver}")
 
-if st.button("Simulate Duel"):
-    # 1. Init Simulators
-    sim_hero = RaceSimulator(trace_hero, hero_driver, current_lap)
-    sim_rival = RaceSimulator(trace_rival, rival_driver, current_lap)
-    duel = DuelSimulator(sim_hero, sim_rival)
+    # 3. Visualization
+    st.subheader("Learned Degradation Curves")
+    st.caption("This chart shows how much pace (seconds) the driver loses per lap on each compound.")
 
-    # 2. Run Gap Simulation
-    # Result is distribution of (HeroTime - RivalTime)
-    gap_dist = duel.simulate_gap(hero_pit, rival_pit, gap_to_rival, pit_loss)
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-    # 3. Analysis
-    # If gap < 0, Hero is AHEAD (Time is smaller)
-    prob_overtake = (gap_dist < 0).mean() * 100
-    expected_gap = -gap_dist.mean()  # Invert so Positive = Lead
+    # Extract mean degradation rates from Posterior
+    deg_means = trace.posterior['deg_rate'].mean(dim=["chain", "draw"]).values
 
-    # 4. Display
-    st.markdown(f"### Probability of Being Ahead: **{prob_overtake:.1f}%**")
+    # Plot curves for visualization (0 to 30 laps)
+    x_laps = range(31)
+    colors = ['red', 'yellow', 'white']  # Soft, Medium, Hard (Standard F1 colors)
 
-    if expected_gap > 0:
-        st.success(f"Prediction: {hero_driver} leads by {expected_gap:.2f} sec")
-    else:
-        st.error(f"Prediction: {hero_driver} trails by {abs(expected_gap):.2f} sec")
+    for i, deg_rate in enumerate(deg_means):
+        if i < len(compounds):
+            # Linear approx: Loss = DegRate * Lap
+            y_loss = [deg_rate * l for l in x_laps]
+            name = compounds[i]
 
-    # 5. Visualization
-    fig, ax = plt.subplots(figsize=(10, 4))
+            # Smart color selection
+            c = 'gray'
+            if "SOFT" in name.upper():
+                c = 'red'
+            elif "MEDIUM" in name.upper():
+                c = 'gold'
+            elif "HARD" in name.upper():
+                c = 'white'
 
-    # Plot the distribution of the final gap
-    # We invert it so Right = Good (Leading)
-    sns.kdeplot(-gap_dist, fill=True, color='purple', alpha=0.6)
-    plt.axvline(0, color='red', linestyle='--', label="Overtake Threshold")
+            ax.plot(x_laps, y_loss, label=f"{name} ({deg_rate:.3f} s/lap)", color=c, linewidth=2.5)
 
-    plt.title(f"Predicted Gap at Finish Line ({hero_driver} vs {rival_driver})")
-    plt.xlabel(f"Gap (seconds) - Positive means {hero_driver} is Ahead")
-    plt.legend()
+    ax.set_facecolor('#1e1e1e')  # Dark background for chart
+    fig.patch.set_facecolor('#0e1117')
+    ax.tick_params(colors='white')
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    ax.set_ylabel("Pace Loss (seconds)")
+    ax.set_xlabel("Tire Age (Laps)")
+    ax.grid(color='#444444', linestyle='--')
+    ax.legend(facecolor='#1e1e1e', labelcolor='white')
     st.pyplot(fig)
+
+    # 4. Single Car Simulation (The "Old" Feature)
+    st.divider()
+    st.subheader("Single-Car Pit Window Optimizer")
+    c1, c2 = st.columns(2)
+    with c1:
+        curr_lap_single = st.number_input("Current Lap", 1, 50, 15, key="single_lap")
+    with c2:
+        target_pit = st.slider("Alternative Pit Lap", curr_lap_single + 1, 57, curr_lap_single + 5, key="single_target")
+
+    if st.button("Analyze Strategy Risk"):
+        sim = RaceSimulator(trace, driver, curr_lap_single)
+
+        # Sim Box Now
+        res_now = sim.simulate_strategy(curr_lap_single + 1, pit_loss)
+        # Sim Box Later
+        res_later = sim.simulate_strategy(target_pit, pit_loss)
+
+        delta = res_later.mean() - res_now.mean()
+
+        if delta > 0:
+            st.success(f"Recommendation: BOX NOW (Gain: {delta:.2f}s)")
+        else:
+            st.warning(f"Recommendation: WAIT (Loss: {delta:.2f}s)")
+
+# =========================================
+# TAB 2: DUEL MODE (Strategy View)
+# =========================================
+with tab_duel:
+    st.header("Head-to-Head Undercut Simulator")
+
+    # 1. Duel Setup
+    col_h, col_r = st.columns(2)
+
+    with col_h:
+        hero_driver = st.selectbox("Hero (Us)", ["VER", "HAM", "LEC", "ALO"], index=0, key="hero")
+        hero_pit = st.slider(f"Pit Lap: {hero_driver}", 10, 57, 20, key="pit_hero")
+
+    with col_r:
+        # Filter rival list to exclude hero
+        rivals = [d for d in ["VER", "HAM", "LEC", "ALO"] if d != hero_driver]
+        rival_driver = st.selectbox("Rival (Them)", rivals, index=0, key="rival")
+        rival_pit = st.slider(f"Pit Lap: {rival_driver}", 10, 57, 24, key="pit_rival")
+
+    # 2. Race Context
+    st.caption("Race Situation")
+    c_gap, c_lap = st.columns(2)
+    with c_gap:
+        gap_to_rival = st.number_input("Gap to Rival (sec)", -10.0, 10.0, 2.0, help="Positive = We are BEHIND")
+    with c_lap:
+        current_lap_duel = st.number_input("Current Lap", 10, 50, 15, key="duel_lap")
+
+    # 3. Run Simulation
+    if st.button("⚔️ Simulate Duel"):
+        # Train both models on the fly (cached)
+        with st.spinner("Calibrating Hero & Rival models..."):
+            trace_h, _, _ = train_model(hero_driver, data)
+            trace_r, _, _ = train_model(rival_driver, data)
+
+        # Init Simulators
+        sim_h = RaceSimulator(trace_h, hero_driver, current_lap_duel)
+        sim_r = RaceSimulator(trace_r, rival_driver, current_lap_duel)
+        duel = DuelSimulator(sim_h, sim_r)
+
+        # Run Math
+        gap_dist = duel.simulate_gap(hero_pit, rival_pit, gap_to_rival, pit_loss)
+
+        # Metrics
+        prob_ahead = (gap_dist < 0).mean() * 100
+        avg_gap = -gap_dist.mean()  # Invert so positive = leading
+
+        # Display
+        st.divider()
+        m1, m2 = st.columns(2)
+        m1.metric("Probability of Overtake", f"{prob_ahead:.1f}%")
+        m2.metric("Predicted Lead", f"{avg_gap:.2f} sec", delta_color="normal")
+
+        # Visual
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        sns.kdeplot(-gap_dist, fill=True, color='purple', alpha=0.6)
+        ax2.axvline(0, color='red', linestyle='--', linewidth=2, label="Overtake Line")
+
+        ax2.set_title(f"Forecast: {hero_driver} vs {rival_driver}")
+        ax2.set_xlabel(f"Gap (sec) - Right of Red Line = {hero_driver} Ahead")
+        ax2.set_yticks([])  # Hide y-axis for clean look
+        ax2.legend()
+
+        st.pyplot(fig2)
